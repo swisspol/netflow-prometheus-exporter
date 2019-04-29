@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
+	"flag"
 	"log"
 	"net"
 	"os"
@@ -73,49 +73,48 @@ func ipToString(ip net.IP) string {
 	return n[0]
 }
 
-func listen(abort chan error) {
-	connection, err := net.ListenPacket("udp4", ":8888") // 2055
+func listen(address string) {
+	connection, err := net.ListenPacket("udp4", address)
 	if err != nil {
-		abort <- err
+		log.Fatal(err)
 	}
 	buffer := make([]byte, 64*1024) // Max UDP packet size
 	for {
 		n, remoteAddr, err := connection.ReadFrom(buffer)
 		if err != nil {
-			abort <- err
+			log.Fatal(err)
 		}
 
 		if n < 24 {
-			abort <- errors.New("Invalid packet")
+			log.Fatal("Invalid packet")
 		}
 		buf := bytes.NewBuffer(buffer)
 		flow := readFlow(buf)
 		if flow.version != 5 {
-			abort <- errors.New("Invalid version")
+			log.Fatal("Invalid version")
 		}
 		if flow.recordCount < 1 || flow.recordCount > 30 {
-			abort <- errors.New("Invalid count")
+			log.Fatal("Invalid count")
 		}
 		log.Println("FROM", remoteAddr, "-", n, "-", flow.version, flow.recordCount, flow.uptime, flow.unixSeconds, flow.unixNanos, flow.sequence, flow.engineType, flow.engineID)
 		for i := 0; i < int(flow.recordCount); i++ {
 			record := readRecord(buf)
-			log.Println("  ", ipToString(makeIP(record.sourceAddress)), "->", ipToString(makeIP(record.destAddress)), "=", record.packetCount, record.byteCount)
+			log.Print("  ", ipToString(makeIP(record.sourceAddress)), "->", ipToString(makeIP(record.destAddress)), "=", record.packetCount, record.byteCount)
 		}
 	}
 }
 
 func main() {
-	log.Print("Running...")
+	serverAddress := flag.String("address", ":2055", "Server listen address")
+	flag.Parse()
 
-	abort := make(chan error)
-	go listen(abort)
+	go listen(*serverAddress)
 
+	log.Printf("Running NetFlow collector on '%s' ...", *serverAddress)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	for {
 		select {
-		case err := <-abort:
-			log.Fatal(err)
 		case <-stop:
 			log.Print("Shutting down")
 			os.Exit(0)
