@@ -4,11 +4,22 @@ import (
 	"bytes"
 	"encoding/binary"
 	"flag"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 )
+
+const metricsNamespace string = "netflow"
+
+var recordCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: metricsNamespace,
+	Name:      "record_count",
+	Help:      "Number of records collected",
+})
 
 // https://www.plixer.com/support/netflow-v5/
 type Flow struct {
@@ -101,16 +112,24 @@ func listen(address string) {
 			record := readRecord(buf)
 			log.Print("  ", ipToString(makeIP(record.sourceAddress)), "->", ipToString(makeIP(record.destAddress)), "=", record.packetCount, record.byteCount)
 		}
+		recordCounter.Add(float64(flow.recordCount))
 	}
 }
 
 func main() {
-	serverAddress := flag.String("address", ":2055", "Server listen address")
+	netflowAddress := flag.String("netflow-address", ":2055", "Address to listen on for Netflow UDP packets")
+	metricsAddress := flag.String("metrics-address", ":8888", "Address to listen on for Prometheus metrics")
 	flag.Parse()
 
-	go listen(*serverAddress)
+	go listen(*netflowAddress)
 
-	log.Printf("Running NetFlow collector on '%s' ...", *serverAddress)
+	prometheus.MustRegister(recordCounter)
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Fatal(http.ListenAndServe(*metricsAddress, nil))
+	}()
+
+	log.Printf("Running NetFlow collector on '%s' and exposing metrics on '%s'...", *netflowAddress, *metricsAddress)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	for {

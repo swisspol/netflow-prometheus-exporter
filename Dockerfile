@@ -1,9 +1,9 @@
 FROM golang:latest
 
 ADD . /go/src/github.com/swisspol/netflow-prometheus-exporter
-RUN cd /go/src/github.com/swisspol/netflow-prometheus-exporter && go build
+RUN export GO111MODULE=on && cd /go/src/github.com/swisspol/netflow-prometheus-exporter && go install
 
 FROM ubuntu:latest
 
-COPY --from=0 /go/src/github.com/swisspol/netflow-prometheus-exporter/netflow-prometheus-exporter /bin/netflow-prometheus-exporter
+COPY --from=0 /go/bin/netflow-prometheus-exporter /bin/netflow-prometheus-exporter
 ENTRYPOINT ["/bin/netflow-prometheus-exporter"]
