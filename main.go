@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 )
 
 const netflowMinPacketSize int = 24
@@ -34,13 +35,13 @@ var protocolPacketCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: metricsNamespace,
 	Name:      "protocol_packets",
 	Help:      "Number of packets per protocol",
-}, []string{"protocol"})
+}, []string{"protocol", "inInterface", "inPort", "outInterface", "outPort"})
 
 var protocolByteCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: metricsNamespace,
 	Name:      "protocol_bytes",
 	Help:      "Number of bytes per protocol",
-}, []string{"protocol"})
+}, []string{"protocol", "inInterface", "inPort", "outInterface", "outPort"})
 
 // https://www.plixer.com/support/netflow-v5/
 type Flow struct {
@@ -69,31 +70,40 @@ func readFlow(buf *bytes.Buffer) (flow Flow) {
 }
 
 type Record struct {
-	sourceAddress uint32
-	destAddress   uint32
-	nextHop       uint32
-	snmpInput     uint16
-	snmpOutput    uint16
-	packetCount   uint32
-	byteCount     uint32
-	uptimeFirst   uint32
-	uptimeLast    uint32
-	sourcePort    uint16
-	destPort      uint16
-	pad1          uint8
-	tcpFlags      uint8
-	ipProtocol    uint8
-	ipTOS         uint8
-	sourceAS      uint16
-	destAS        uint16
-	sourceMask    uint8
-	destMask      uint8
-	pad2          uint16
+	sourceIP    net.IP
+	destIP      net.IP
+	nextHop     uint32
+	snmpInput   uint16
+	snmpOutput  uint16
+	packetCount uint32
+	byteCount   uint32
+	uptimeFirst uint32
+	uptimeLast  uint32
+	sourcePort  uint16
+	destPort    uint16
+	pad1        uint8
+	tcpFlags    uint8
+	ipProtocol  uint8
+	ipTOS       uint8
+	sourceAS    uint16
+	destAS      uint16
+	sourceMask  uint8
+	destMask    uint8
+	pad2        uint16
+}
+
+func makeIP(nn uint32) net.IP {
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, nn)
+	return ip
 }
 
 func readRecord(buf *bytes.Buffer) (record Record) {
-	_ = binary.Read(buf, binary.BigEndian, &record.sourceAddress)
-	_ = binary.Read(buf, binary.BigEndian, &record.destAddress)
+	var address uint32
+	_ = binary.Read(buf, binary.BigEndian, &address)
+	record.sourceIP = makeIP(address)
+	_ = binary.Read(buf, binary.BigEndian, &address)
+	record.destIP = makeIP(address)
 	_ = binary.Read(buf, binary.BigEndian, &record.nextHop)
 	_ = binary.Read(buf, binary.BigEndian, &record.snmpInput)
 	_ = binary.Read(buf, binary.BigEndian, &record.snmpOutput)
@@ -115,41 +125,36 @@ func readRecord(buf *bytes.Buffer) (record Record) {
 	return record
 }
 
-func makeIP(nn uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.BigEndian.PutUint32(ip, nn)
-	return ip
-}
-
-func ipToString(ip net.IP) string {
-	s := ip.String()
-	n, err := net.LookupAddr(s)
-	if err != nil {
-		return s
-	}
-	return n[0]
-}
+// https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
+const (
+	ICMP = 1
+	IGMP = 2
+	IPIP = 4
+	TCP  = 6
+	UDP  = 17
+	ESP  = 50
+)
 
 func protocolToString(p uint8) string {
 	switch p {
-	case 1:
+	case ICMP:
 		return "ICMP"
-	case 2:
+	case IGMP:
 		return "IGMP"
-	case 4:
+	case IPIP:
 		return "IPIP"
-	case 6:
+	case TCP:
 		return "TCP"
-	case 17:
+	case UDP:
 		return "UDP"
-	case 41:
-		return "IPv6"
+	case ESP:
+		return "ESP"
 	default:
-		return string(p)
+		return strconv.Itoa(int(p))
 	}
 }
 
-func listen(address string) {
+func listen(address string, debug bool) {
 	connection, err := net.ListenPacket("udp4", address)
 	if err != nil {
 		log.Fatal(err)
@@ -178,8 +183,15 @@ func listen(address string) {
 		for i := 0; i < int(flow.recordCount); i++ {
 			record := readRecord(buf)
 			protocol := protocolToString(record.ipProtocol)
-			protocolPacketCounter.WithLabelValues(protocol).Add(float64(record.packetCount))
-			protocolByteCounter.WithLabelValues(protocol).Add(float64(record.byteCount))
+			inInterface := strconv.Itoa(int(record.snmpInput))
+			outInterface := strconv.Itoa(int(record.snmpOutput))
+			inPort := strconv.Itoa(int(record.sourcePort))
+			outPort := strconv.Itoa(int(record.destPort))
+			protocolPacketCounter.WithLabelValues(protocol, inInterface, inPort, outInterface, outPort).Add(float64(record.packetCount))
+			protocolByteCounter.WithLabelValues(protocol, inInterface, inPort, outInterface, outPort).Add(float64(record.byteCount))
+			if debug {
+				log.Printf("[%s / %d] %s:%d (%d) -> %s:%d (%d)", protocol, record.ipTOS, record.sourceIP.String(), record.sourcePort, record.snmpInput, record.destIP.String(), record.destPort, record.snmpOutput)
+			}
 		}
 	}
 }
@@ -187,9 +199,10 @@ func listen(address string) {
 func main() {
 	netflowAddress := flag.String("netflow-address", ":2055", "Address to listen on for Netflow UDP packets")
 	metricsAddress := flag.String("metrics-address", ":8888", "Address to listen on for Prometheus metrics")
+	debug := flag.Bool("debug", false, "Print debug information")
 	flag.Parse()
 
-	go listen(*netflowAddress)
+	go listen(*netflowAddress, *debug)
 
 	prometheus.MustRegister(recordCounter, flowGauge, protocolPacketCounter, protocolByteCounter)
 	go func() {
